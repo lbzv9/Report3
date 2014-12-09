@@ -1,0 +1,25 @@
+<div ng-controller='ClusterCtrl'>
+  <div class="container-fluid">
+    <div class="row-fluid">
+      <div class="span2">
+        <p>Click to filter twitter groups that contain the selected bibleverse (click again to see all)</p>
+        <table class="table table-hover table-bordered table-condensed" >
+          <thead>
+            <tr>
+              <th>Bible Reference</th>
+              <th>Tweet Count</th>
+            </tr>
+          </thead>
+          <tr ng-repeat='facet in facets',  ng-click="clickedFacet($index)", class="{{facet.class}}">
+            <td>{{facet.term}}</td><td>{{facet.count}}</td>
+          </tr>
+        </table>
+      </div> <!-- span2 -->
+
+      <div class="span10">
+        <h4>Bibleverses grouped by usage on twitter</h>
+        <hkuk-clusters-viz clusters='clusters'></hkuk-clusters-viz>
+      </div>
+    </div>
+  </div>
+</div>

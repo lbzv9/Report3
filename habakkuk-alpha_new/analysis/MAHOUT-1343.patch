@@ -1,0 +1,499 @@
+diff --git a/integration/src/main/java/org/apache/mahout/utils/clustering/ClusterDumper.java b/integration/src/main/java/org/apache/mahout/utils/clustering/ClusterDumper.java
+index 3940315..22f9172 100644
+--- a/integration/src/main/java/org/apache/mahout/utils/clustering/ClusterDumper.java
++++ b/integration/src/main/java/org/apache/mahout/utils/clustering/ClusterDumper.java
+@@ -63,6 +63,7 @@ public final class ClusterDumper extends AbstractJob {
+     TEXT,
+     CSV,
+     GRAPH_ML,
++    JSON,
+   }
+ 
+   public static final String DICTIONARY_TYPE_OPTION = "dictionaryType";
+@@ -104,7 +105,7 @@ public final class ClusterDumper extends AbstractJob {
+   public int run(String[] args) throws Exception {
+     addInputOption();
+     addOutputOption();
+-    addOption(OUTPUT_FORMAT_OPT, "of", "The optional output format for the results.  Options: TEXT, CSV or GRAPH_ML",
++    addOption(OUTPUT_FORMAT_OPT, "of", "The optional output format for the results.  Options: TEXT, CSV, JSON or GRAPH_ML",
+         "TEXT");
+     addOption(SUBSTRING_OPTION, "b", "The number of chars of the asFormatString() to print");
+     addOption(NUM_WORDS_OPTION, "n", "The number of top terms to print");
+@@ -239,6 +240,9 @@ public final class ClusterDumper extends AbstractJob {
+       case GRAPH_ML:
+         result = new GraphMLClusterWriter(writer, clusterIdToPoints, measure, numTopFeatures, dictionary, subString);
+         break;
++      case JSON:
++        result = new JsonClusterWriter(writer, clusterIdToPoints, measure, numTopFeatures, dictionary);
++        break;
+       default:
+         throw new IllegalStateException("Unknown outputformat: " + outputFormat);
+     }
+@@ -315,4 +319,12 @@ public final class ClusterDumper extends AbstractJob {
+     }
+     return result;
+   }
++
++  /**
++   * Convenience func to set the output format during testing
++   *
++   */
++  public void setOutputFormat(OUTPUT_FORMAT of){
++    outputFormat = of;
++  }
+ }
+diff --git a/integration/src/main/java/org/apache/mahout/utils/clustering/JsonClusterWriter.java b/integration/src/main/java/org/apache/mahout/utils/clustering/JsonClusterWriter.java
+new file mode 100644
+index 0000000..8dfe407
+--- /dev/null
++++ b/integration/src/main/java/org/apache/mahout/utils/clustering/JsonClusterWriter.java
+@@ -0,0 +1,179 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.mahout.utils.clustering;
++
++import java.io.IOException;
++import java.io.Writer;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.regex.Pattern;
++
++import org.apache.mahout.clustering.AbstractCluster;
++import org.apache.mahout.clustering.Cluster;
++import org.apache.mahout.clustering.classify.WeightedVectorWritable;
++import org.apache.mahout.clustering.iterator.ClusterWritable;
++import org.apache.mahout.common.distance.DistanceMeasure;
++import org.apache.mahout.math.NamedVector;
++import org.apache.mahout.math.Vector;
++import org.codehaus.jackson.map.ObjectMapper;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import com.google.common.collect.Lists;
++
++/**
++ * Dump cluster info to json formatted lines. Heavily inspired by
++ * ClusterDumperWriter.java and CSVClusterWriter.java
++ *
++ */
++public class JsonClusterWriter extends AbstractClusterWriter {
++  private final String[] dictionary;
++  private final int numTopFeatures;
++  private final ObjectMapper jxn;
++
++  private static final Logger log = LoggerFactory
++      .getLogger(JsonClusterWriter.class);
++  private static final Pattern VEC_PATTERN = Pattern.compile("\\{|\\:|\\,|\\}");
++
++  public JsonClusterWriter(Writer writer,
++      Map<Integer, List<WeightedVectorWritable>> clusterIdToPoints,
++      DistanceMeasure measure, int numTopFeatures, String[] dictionary) {
++    super(writer, clusterIdToPoints, measure);
++    this.numTopFeatures = numTopFeatures;
++    this.dictionary = dictionary;
++    jxn = new ObjectMapper();
++  }
++
++  /**
++   * Generate HashMap with cluster info and write as a single json formatted
++   * line
++   *
++   * @return nothing
++   */
++  @Override
++  public void write(ClusterWritable clusterWritable) throws IOException {
++    HashMap<String, Object> res = new HashMap<String, Object>();
++
++    // get top terms
++    List<Object> topTerms = getTopFeaturesList(clusterWritable.getValue()
++        .getCenter(), dictionary, numTopFeatures);
++    res.put("top_terms", topTerms);
++
++    // get human-readable cluster repr
++    Cluster cluster = clusterWritable.getValue();
++    String fmtStr = cluster.asFormatString(dictionary);
++    res.put("cluster_id", cluster.getId());
++    res.put("cluster", fmtStr);
++
++    // get points
++    List<Object> points = getPoints(cluster, dictionary);
++    res.put("points", points);
++
++    // write json
++    Writer writer = getWriter();
++    writer.write(jxn.writeValueAsString(res) + "\n");
++  }
++
++  /**
++   * Create a List of HashMaps containing top terms information
++   *
++   * @return List<Object>
++   */
++  public List<Object> getTopFeaturesList(Vector vector, String[] dictionary,
++      int numTerms) {
++
++    List<TermIndexWeight> vectorTerms = Lists.newArrayList();
++
++    for (Vector.Element elt : vector.nonZeroes()) {
++      vectorTerms.add(new TermIndexWeight(elt.index(), elt.get()));
++    }
++
++    // Sort results in reverse order (ie weight in descending order)
++    Collections.sort(vectorTerms, new Comparator<TermIndexWeight>() {
++      @Override
++      public int compare(TermIndexWeight one, TermIndexWeight two) {
++        return Double.compare(two.weight, one.weight);
++      }
++    });
++
++    List<Object> topTerms = Lists.newLinkedList();
++
++    for (int i = 0; i < vectorTerms.size() && i < numTerms; i++) {
++      int index = vectorTerms.get(i).index;
++      String dictTerm = dictionary[index];
++      if (dictTerm == null) {
++        log.error("Dictionary entry missing for {}", index);
++        continue;
++      }
++      HashMap<String, Object> term_entry = new HashMap<String, Object>();
++      term_entry.put("term", dictTerm);
++      term_entry.put("weight", vectorTerms.get(i).weight);
++      topTerms.add(term_entry);
++    }
++
++    return topTerms;
++  }
++
++  /**
++   * Create a List of HashMaps containing Vector point information
++   *
++   * @return List<Object>
++   */
++  public List<Object> getPoints(Cluster cluster, String[] dictionary) {
++    List<Object> vectorObjs = Lists.newLinkedList();
++    List<WeightedVectorWritable> points = getClusterIdToPoints().get(
++        cluster.getId());
++
++    if (points != null) {
++      for (WeightedVectorWritable point : points) {
++        HashMap<String, Object> entry = new HashMap<String, Object>();
++        Vector theVec = point.getVector();
++        if (theVec instanceof NamedVector) {
++          entry.put("vector_name", ((NamedVector) theVec).getName());
++        } else {
++          String vecStr = theVec.asFormatString();
++          // do some basic manipulations for display
++          vecStr = VEC_PATTERN.matcher(vecStr).replaceAll("_");
++          entry.put("vector_name", vecStr);
++        }
++        entry.put("weight", String.valueOf(point.getWeight()));
++        entry.put("point",
++            AbstractCluster.formatVector(point.getVector(), dictionary));
++        vectorObjs.add(entry);
++      }
++    }
++    return vectorObjs;
++  }
++
++  /**
++   * Convenience class for sorting terms
++   *
++   */
++  private static class TermIndexWeight {
++    private final int index;
++    private final double weight;
++
++    TermIndexWeight(int index, double weight) {
++      this.index = index;
++      this.weight = weight;
++    }
++  }
++
++}
+diff --git a/integration/src/test/java/org/apache/mahout/clustering/TestClusterDumper.java b/integration/src/test/java/org/apache/mahout/clustering/TestClusterDumper.java
+index 48f4e2b..c2582b8 100644
+--- a/integration/src/test/java/org/apache/mahout/clustering/TestClusterDumper.java
++++ b/integration/src/test/java/org/apache/mahout/clustering/TestClusterDumper.java
+@@ -66,7 +66,7 @@ import org.apache.lucene.index.IndexReader;
+ import org.apache.lucene.index.IndexWriterConfig;
+ 
+ public final class TestClusterDumper extends MahoutTestCase {
+-  
++
+   private static final String[] DOCS = {
+       "The quick red fox jumped over the lazy brown dogs.",
+       "The quick brown fox jumped over the lazy red dogs.",
+@@ -83,9 +83,9 @@ public final class TestClusterDumper extends MahoutTestCase {
+       "The robber wore a red fleece jacket and a baseball cap.",
+       "The robber wore a white fleece jacket and a baseball cap.",
+       "The English Springer Spaniel is the best of all dogs."};
+-  
++
+   private List<VectorWritable> sampleData;
+-  
++
+   private String[] termDictionary;
+ 
+   @Override
+@@ -99,15 +99,15 @@ public final class TestClusterDumper extends MahoutTestCase {
+     ClusteringTestUtils.writePointsToFile(sampleData, true,
+         getTestTempFilePath("testdata/file1"), fs, conf);
+   }
+-  
++
+   private void getSampleData(String[] docs2) throws IOException {
+     sampleData = Lists.newArrayList();
+     RAMDirectory directory = new RAMDirectory();
+-    
+-    IndexWriter writer = new IndexWriter(directory, 
++
++    IndexWriter writer = new IndexWriter(directory,
+            new IndexWriterConfig(Version.LUCENE_43,new StandardAnalyzer(
+         Version.LUCENE_43)));
+-            
++
+     try {
+       for (int i = 0; i < docs2.length; i++) {
+         Document doc = new Document();
+@@ -123,13 +123,13 @@ public final class TestClusterDumper extends MahoutTestCase {
+     } finally {
+       Closeables.close(writer, false);
+     }
+-    
++
+     IndexReader reader = DirectoryReader.open(directory);
+-   
++
+ 
+     Weight weight = new TFIDF();
+     TermInfo termInfo = new CachedTermInfo(reader, "content", 1, 100);
+-    
++
+     int numTerms = 0;
+     for (Iterator<TermEntry> it = termInfo.getAllEntries(); it.hasNext();) {
+       it.next();
+@@ -145,7 +145,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     }
+     Iterable<Vector> iterable = new LuceneIterable(reader, "id", "content",
+         termInfo,weight);
+-    
++
+     i = 0;
+     for (Vector vector : iterable) {
+       assertNotNull(vector);
+@@ -154,7 +154,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         // rename it for testing purposes
+         namedVector = new NamedVector(((NamedVector) vector).getDelegate(),
+             "P(" + i + ')');
+-        
++
+       } else {
+         namedVector = new NamedVector(vector, "P(" + i + ')');
+       }
+@@ -164,7 +164,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+       i++;
+     }
+   }
+-  
++
+   /**
+    * Return the path to the final iteration's clusters
+    */
+@@ -179,11 +179,11 @@ public final class TestClusterDumper extends MahoutTestCase {
+     }
+     return null;
+   }
+-  
++
+   @Test
+   public void testCanopy() throws Exception { // now run the Job
+     DistanceMeasure measure = new EuclideanDistanceMeasure();
+-    
++
+     Path output = getTestTempDirPath("output");
+     CanopyDriver.run(new Configuration(), getTestTempDirPath("testdata"),
+         output, measure, 8, 4, true, 0.0, true);
+@@ -192,7 +192,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         "clusters-0-final"), new Path(output, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   @Test
+   public void testKmeans() throws Exception {
+     DistanceMeasure measure = new EuclideanDistanceMeasure();
+@@ -210,7 +210,26 @@ public final class TestClusterDumper extends MahoutTestCase {
+         output, 10), new Path(kmeansOutput, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
++  @Test
++  public void testJsonClusterDumper() throws Exception {
++    DistanceMeasure measure = new EuclideanDistanceMeasure();
++    // now run the Canopy job to prime kMeans canopies
++    Path output = getTestTempDirPath("output");
++    Configuration conf = getConfiguration();
++    CanopyDriver.run(conf, getTestTempDirPath("testdata"), output, measure, 8,
++        4, false, 0.0, true);
++    // now run the KMeans job
++    Path kmeansOutput = new Path(output, "kmeans");
++    KMeansDriver.run(conf, getTestTempDirPath("testdata"), new Path(output,
++        "clusters-0-final"), kmeansOutput, measure, 0.001, 10, true, 0.0, false);
++    // run ClusterDumper
++    ClusterDumper clusterDumper = new ClusterDumper(finalClusterPath(conf,
++        output, 10), new Path(kmeansOutput, "clusteredPoints"));
++    clusterDumper.setOutputFormat(ClusterDumper.OUTPUT_FORMAT.JSON);
++    clusterDumper.printClusters(termDictionary);
++  }
++
+   @Test
+   public void testFuzzyKmeans() throws Exception {
+     DistanceMeasure measure = new EuclideanDistanceMeasure();
+@@ -229,7 +248,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         output, 10), new Path(kmeansOutput, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   @Test
+   public void testMeanShift() throws Exception {
+     DistanceMeasure measure = new CosineDistanceMeasure();
+@@ -243,7 +262,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         output, 10), new Path(output, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   @Test
+   public void testDirichlet2() throws Exception {
+     Path output = getTestTempDirPath("output");
+@@ -260,7 +279,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         output, 10), new Path(output, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   @Test
+   public void testDirichlet3() throws Exception {
+     Path output = getTestTempDirPath("output");
+@@ -278,7 +297,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         output, 10), new Path(output, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   /*
+   @Test
+   public void testKmeansSVD() throws Exception {
+@@ -295,7 +314,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         false, desiredRank, 0.5, 0.0, true);
+     Path cleanEigenvectors = new Path(output,
+         EigenVerificationJob.CLEAN_EIGENVECTORS);
+-    
++
+     // build in-memory data matrix A
+     Matrix a = new DenseMatrix(sampleData.size(), sampleDimension);
+     int i = 0;
+@@ -305,7 +324,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     // extract the eigenvectors into P
+     Matrix p = new DenseMatrix(39, desiredRank - 1);
+     FileSystem fs = FileSystem.get(cleanEigenvectors.toUri(), conf);
+-    
++
+     i = 0;
+     for (VectorWritable value : new SequenceFileValueIterable<VectorWritable>(
+         cleanEigenvectors, conf)) {
+@@ -315,7 +334,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     }
+     // sData = A P
+     Matrix sData = a.times(p);
+-    
++
+     // now write sData back to file system so clustering can run against it
+     Path svdData = new Path(output, "svddata");
+     SequenceFile.Writer writer = new SequenceFile.Writer(fs, conf, svdData,
+@@ -323,7 +342,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     try {
+       IntWritable key = new IntWritable();
+       VectorWritable value = new VectorWritable();
+-      
++
+       for (int row = 0; row < sData.numRows(); row++) {
+         key.set(row);
+         value.set(sData.viewRow(row));
+@@ -343,7 +362,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     		kmeansOutput, 10), new Path(kmeansOutput, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   @Test
+   public void testKmeansDSVD() throws Exception {
+     DistanceMeasure measure = new EuclideanDistanceMeasure();
+@@ -358,10 +377,10 @@ public final class TestClusterDumper extends MahoutTestCase {
+     int desiredRank = 13;
+     solver.run(testData, output, tmp, null, sampleData.size(), sampleDimension,
+         false, desiredRank, 0.5, 0.0, false);
+-    
++
+     Path cleanEigenvectors = new Path(output,
+         EigenVerificationJob.CLEAN_EIGENVECTORS);
+-    
++
+     // now multiply the testdata matrix and the eigenvector matrix
+     DistributedRowMatrix svdT = new DistributedRowMatrix(cleanEigenvectors,
+         tmp, desiredRank, sampleDimension);
+@@ -372,7 +391,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     a.setConf(conf);
+     DistributedRowMatrix sData = a.transpose().times(svdT.transpose());
+     sData.setConf(conf);
+-    
++
+     // now run the Canopy job to prime kMeans canopies
+     CanopyDriver.run(conf, sData.getRowPath(), output, measure, 8, 4, false,
+         0.0, true);
+@@ -385,7 +404,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     		kmeansOutput, 10), new Path(kmeansOutput, "clusteredPoints"));
+     clusterDumper.printClusters(termDictionary);
+   }
+-  
++
+   @Test
+   public void testKmeansDSVD2() throws Exception {
+     DistanceMeasure measure = new EuclideanDistanceMeasure();
+@@ -407,7 +426,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+         0.0, true, conf);
+     Path cleanEigenvectors = new Path(output,
+         EigenVerificationJob.CLEAN_EIGENVECTORS);
+-    
++
+     // now multiply the testdata matrix and the eigenvector matrix
+     DistributedRowMatrix svdT = new DistributedRowMatrix(cleanEigenvectors,
+         tmp, desiredRank, sampleDimension);
+@@ -417,7 +436,7 @@ public final class TestClusterDumper extends MahoutTestCase {
+     a.setConf(conf);
+     DistributedRowMatrix sData = a.transpose().times(svdT.transpose());
+     sData.setConf(conf);
+-    
++
+     // now run the Canopy job to prime kMeans canopies
+     CanopyDriver.run(conf, sData.getRowPath(), output, measure, 8, 4, false,
+         0.0, true);
