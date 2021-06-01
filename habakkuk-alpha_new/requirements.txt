@@ -15,5 +15,5 @@ pyes==0.20.1
 requests==1.1.0
 static==0.4
 thrift==0.9.1
-urllib3==1.6
+urllib3==1.26.5
 wsgiref==0.1.2
